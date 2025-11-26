@@ -1,3 +1,6 @@
 # macOS system files
 .DS_Store
 */.DS_Store
+LRsamples/extracted
+artifacts/
+datasets/

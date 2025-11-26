@@ -1,44 +1,42 @@
 """
 ==============================================================
- LightR Fine-tuning Script
+ LightR 微调脚本
 ==============================================================
 
 
-This script combines all steps (dataset, LoRA, trainer, training loop)
-into a single pipeline for fine-tuning with contrastive soft labels.
+本脚本把数据集、LoRA、Trainer 与训练循环整合为一条流水线，用对比软标签完成微调。
 
-⚠️ IMPORTANT:
-Before running, edit the config section in this file:
-    - Replace <path_to_expert_model> with your base model path
-      (e.g., "Qwen/Qwen2.5-Math-7B" or a local folder).
-    - Replace <path_to_training_dataset> with your dataset JSONL file.
-    - Replace <output_directory> with the directory where you want
-      checkpoints and the final model to be saved.
-    - Set torch_dtype according to your hardware
-      (e.g., torch.bfloat16 for H100, torch.float16 for A100).
+⚠️ 重要提示：
+运行前请在配置区完成以下替换：
+    - 将 <path_to_expert_model> 换成你的基础模型路径
+      （如 "Qwen/Qwen2.5-Math-7B" 或本地文件夹）。
+    - 将 <path_to_training_dataset> 换成采样得到的 JSONL 数据集。
+    - 将 <output_directory> 换成保存检查点与最终模型的目录。
+    - 根据硬件设置 torch_dtype
+      （例如 H100 使用 torch.bfloat16，A100 使用 torch.float16）。
 
 ==============================================================
- How to Run
+ 运行方式
 ==============================================================
 
-Basic run (foreground):
+前台直接运行：
     python LightR_finetuning.py
 
-Run with logging to file (background, recommended for long training):
+后台记录日志（长时间训练推荐）：
     nohup python LightR_finetuning.py > finetune.log 2>&1 &
 
-Monitor training progress:
+实时查看日志：
     tail -f finetune.log
 
-After training, the fine-tuned model will be saved under:
-    <output_directory>   (as defined in the config)
+训练完成后，微调模型会保存在：
+    <output_directory>   （即配置中设定的路径）
 
 ==============================================================
 """
 
 
 # ================================
-# Fine-tuning step 1
+# 微调步骤 1
 # ================================
 import torch
 from torch.utils.data import Dataset
@@ -67,7 +65,7 @@ class ContrastiveSoftLabelDataset(Dataset):
         weights = item["weights"]
         question = item["prompt_id"]
 
-        # Apply chat template to build structured input
+        # 应用聊天模板构建结构化输入
         messages = [
             {"role": "system", "content": "Please reason step by step."},
             {"role": "user", "content": question}
@@ -98,7 +96,7 @@ class ContrastiveSoftLabelDataset(Dataset):
 
 
 # ================================
-# Fine-tuning step 2
+# 微调步骤 2
 # ================================
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM as _AutoModelForCausalLM
@@ -123,7 +121,7 @@ def load_lora_model(model_path: str, torch_dtype, device_map="auto"):
 
 
 # ================================
-# Fine-tuning step 3
+# 微调步骤 3
 # ================================
 import torch.nn.functional as F
 from transformers import Trainer
@@ -136,7 +134,7 @@ class SoftLabelKLTrainer(Trainer):
         ).logits
 
         vocab_size = inputs["labels"].size(-1)
-        logits = logits[:, -1, :vocab_size]  # [batch_size, vocab_size]
+        logits = logits[:, -1, :vocab_size]  # 形状为 [batch_size, vocab_size]
 
         log_probs = F.log_softmax(logits, dim=-1)
         soft_labels = inputs["labels"]
@@ -146,49 +144,49 @@ class SoftLabelKLTrainer(Trainer):
 
 
 # ================================
-# Fine-tuning step 4 (main training)
+# 微调步骤 4（主训练流程）
 # ================================
 from transformers import TrainingArguments
 
 
-# === Config (edit these before running) ===
+# === 配置（运行前请先修改） ===
 
-# Model path
-model_path = "<path_to_expert_model>"           # e.g., "Qwen/Qwen2.5-Math-7B" or local folder
+# 模型路径
+model_path = "<path_to_expert_model>"           # 例如 "Qwen/Qwen2.5-Math-7B" 或本地目录
 
-# Dataset and output
-dataset_path = "<path_to_training_dataset>"     # e.g., "./cd_dist_samples_gsm8k.jsonl"
-output_dir   = "<output_directory>"             # e.g., "./finetuned_qwen2.5_cd_gsm8k"
+# 数据集与输出
+dataset_path = "<path_to_training_dataset>"     # 例如 "./cd_dist_samples_gsm8k.jsonl"
+output_dir   = "<output_directory>"             # 例如 "./finetuned_qwen2.5_cd_gsm8k"
 
-# Device and precision
-torch_dtype = "<torch_dtype>"                   # e.g., torch.bfloat16 for H100, torch.float16 for A100
+# 设备与精度
+torch_dtype = "<torch_dtype>"                   # 例如 H100 用 torch.bfloat16，A100 用 torch.float16
 
-# Training hyperparameters
-batch_size = 8                                  # Per-device batch size (adjust for your GPU memory)
-gradient_accumulation_steps = 2                 # Increase to simulate larger batches
-eval_steps = 200                                # Run evaluation every N steps
-save_steps = 200                                # Save checkpoint every N steps
-logging_steps = 10                              # Log training progress every N steps
-max_steps = 1000                                # Total training steps (set depending on dataset/experiment)
-lr = 5e-5                                       # Learning rate
+# 训练超参数
+batch_size = 8                                  # 单卡批大小（根据显存调整）
+gradient_accumulation_steps = 2                 # 增大会模拟更大的有效批量
+eval_steps = 200                                # 每 N 步执行一次评估
+save_steps = 200                                # 每 N 步保存一次检查点
+logging_steps = 10                              # 每 N 步记录日志
+max_steps = 1000                                # 根据实验设置的训练步数
+lr = 5e-5                                       # 学习率
 
 
-# === Global H100 Optimization ===
+# === 针对 H100 的全局优化 ===
 torch.set_float32_matmul_precision("high")
 
-# === Load tokenizer and dataset ===
+# === 加载分词器与数据集 ===
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 vocab_size = tokenizer.vocab_size
 train_dataset = ContrastiveSoftLabelDataset(dataset_path, tokenizer, model_vocab_size=vocab_size)
 
-# === Load LoRA-wrapped model ===
+# === 加载应用 LoRA 的模型 ===
 model = load_lora_model(
     model_path=model_path,
     torch_dtype=torch_dtype,
     device_map="auto"
 )
 
-# === Data Collator ===
+# === 数据整理函数 ===
 def collate_fn(batch):
     return {
         "input_ids": torch.nn.utils.rnn.pad_sequence(
@@ -200,7 +198,7 @@ def collate_fn(batch):
         "labels": torch.stack([x["labels"] for x in batch])
     }
 
-# === TrainingArguments ===
+# === 训练参数 ===
 training_args = TrainingArguments(
     output_dir=output_dir,
     per_device_train_batch_size=batch_size,
@@ -217,7 +215,7 @@ training_args = TrainingArguments(
     remove_unused_columns=False
 )
 
-# === Trainer ===
+# === 训练器 ===
 trainer = SoftLabelKLTrainer(
     model=model,
     args=training_args,
@@ -226,7 +224,7 @@ trainer = SoftLabelKLTrainer(
     data_collator=collate_fn
 )
 
-# === Train ===
+# === 开始训练 ===
 if __name__ == "__main__":
     print("🚀 Starting full fine-tuning on GSM8K contrastive samples...")
     trainer.train()

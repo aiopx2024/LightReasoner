@@ -1,16 +1,16 @@
-'''Use this to merge the FULL model (base + LoRA) locally so that it behaves like a standalone model with no LoRA dependency.'''
+'''用于在本地合并完整模型（基座 + LoRA），让其无需 LoRA 依赖即可独立使用。'''
 
 
 import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# === Config ===
-base_model_path = "<path_to_base_model>" # e.g., ./Qwen2.5-Math-7B
-lora_ckpt_path = "<path_to_lora_checkpoint>" # e.g., ./ft_qwen2.5_gsm8k/checkpoint-1000
-merged_model_path = "<path_to_save_merged_model>" # e.g., ./ft-7B-merged
+# === 配置 ===
+base_model_path = "<path_to_base_model>" # 例如 ./Qwen2.5-Math-7B
+lora_ckpt_path = "<path_to_lora_checkpoint>" # 例如 ./ft_qwen2.5_gsm8k/checkpoint-1000
+merged_model_path = "<path_to_save_merged_model>" # 例如 ./ft-7B-merged
 
-# === Step 1: Load base model and LoRA adapter ===
+# === 第 1 步：加载基座模型与 LoRA 适配器 ===
 print("🔧 Loading base + LoRA model...")
 base_model = AutoModelForCausalLM.from_pretrained(
     base_model_path,
@@ -19,11 +19,11 @@ base_model = AutoModelForCausalLM.from_pretrained(
 )
 model = PeftModel.from_pretrained(base_model, lora_ckpt_path)
 
-# === Step 2: Merge weights and unload PEFT structure ===
+# === 第 2 步：合并权重并卸载 PEFT 结构 ===
 print("🔗 Merging LoRA weights into base model...")
 merged_model = model.merge_and_unload()
 
-# === Step 3: Save merged model and tokenizer ===
+# === 第 3 步：保存合并后的模型与分词器 ===
 print(f"💾 Saving merged model to: {merged_model_path}")
 merged_model.save_pretrained(merged_model_path)
 

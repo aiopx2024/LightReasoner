@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug: LightR Sampling (10 samples)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/LightR_sampling.py",
+            "console": "integratedTerminal",
+            "args": ["--max_questions", "10"],
+            "justMyCode": true,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            }
+        }
+    ]
+}
