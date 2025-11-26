@@ -146,42 +146,85 @@ for item in tqdm(expert_cache, desc="Amateur Evaluation"):
     expert_targets = item["expert_targets"]
     expert_probs = item["expert_probs"]
     
-    # 构造 Amateur 输入 batch
-    input_ids_batch = []
+    # 构造 Amateur 的完整输入 (Prompt + Expert Response)
+    # 这样我们只需要做一次 Forward 就能拿到每一步的预测结果
     
-    # 基础 prompt 的 token ids
-    base_input_ids = tokenizer(item["prompt_text_formatted"], return_tensors="pt").input_ids[0]
+    # 1. 重新构建完整的对话 Prompt (不包含 Expert 回答)
+    #    注意：这里必须保证和 Expert 阶段完全一致的 Prompt 格式
+    if "messages" in prompt_obj:
+        # 复用之前提取的 sys_prompt 和 question
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": question}
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": question}
+        ]
     
-    for step in range(1, len(expert_targets)):
-        # 拼接: Base Prompt + Expert 生成的前缀
-        prefix_ids = torch.tensor(expert_targets[:step], dtype=torch.long)
-        input_ids = torch.cat([base_input_ids, prefix_ids], dim=0)
-        input_ids_batch.append(input_ids)
-
-    # Amateur 批量推理
-    amateur_probs_all = []
+    # 基础 Prompt 文本 (不含 Generation Prompt，因为我们要手动拼接 Expert 回答)
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    # 2. 拼接 Expert 的回答
+    #    expert_targets 是 token IDs，我们需要先解码回文本，或者直接在 ID 层面拼接
+    #    为了稳妥（避免分词差异），最好是在 ID 层面拼接
+    
+    # 编码 Prompt
+    prompt_inputs = tokenizer(prompt_text, return_tensors="pt")
+    prompt_ids = prompt_inputs.input_ids[0]
+    
+    # Expert 的回答 IDs
+    expert_ids = torch.tensor(expert_targets, dtype=torch.long)
+    
+    # 拼接完整序列: [Prompt, Expert_Response]
+    full_input_ids = torch.cat([prompt_ids, expert_ids], dim=0)
+    
+    # 3. Amateur 单次前向传播 (Single Forward Pass)
+    #    一次性计算所有位置的 Logits
+    full_input_ids_batch = full_input_ids.unsqueeze(0).to(device) # [1, Seq_Len]
+    
     with torch.no_grad():
-        for i in range(0, len(input_ids_batch), batch_size):
-            batch_chunk = input_ids_batch[i:i+batch_size]
-            
-            # Padding
-            padded = torch.nn.utils.rnn.pad_sequence(batch_chunk, batch_first=True, padding_value=tokenizer.pad_token_id).to(device)
-            attention_mask = (padded != tokenizer.pad_token_id).long()
-            
-            # Forward
-            logits = amateur_model(padded, attention_mask=attention_mask).logits
-            
-            for j, seq_len in enumerate([x.size(0) for x in batch_chunk]):
-                next_token_logits = logits[j, seq_len - 1, :]
-                probs = F.softmax(next_token_logits, dim=-1)
-                amateur_probs_all.append(probs.cpu()) # 移回 CPU
+        outputs = amateur_model(full_input_ids_batch)
+        logits = outputs.logits # [1, Seq_Len, Vocab]
+        
+        # 4. 提取对应的 Logits
+        #    我们需要的是：看到 Prompt -> 预测 Expert_Token_1
+        #                看到 Prompt + T1 -> 预测 Expert_Token_2
+        #    
+        #    Logits 下标 i 的输出是预测第 i+1 个 Token
+        #    Prompt 长度为 L (prompt_ids.size(0))
+        #    我们需要的 Logits 起点是 L-1 (对应 Prompt 最后一个 Token 的输出，预测 Expert 第一个 Token)
+        #    终点是 -1 (对应 Expert 倒数第二个 Token 的输出，预测 Expert 最后一个 Token)
+        
+        start_idx = prompt_ids.size(0) - 1
+        end_idx = full_input_ids.size(0) - 1
+        
+        # 截取有效片段 [1, Expert_Len, Vocab]
+        relevant_logits = logits[:, start_idx:end_idx, :]
+        
+        # 转为概率分布并移至 CPU
+        # 注意：这里可能显存占用较大，如果 Expert 回答很长。
+        # 但相比之前 Batch=1 的多次推理，这里只存了一个 (Seq, Vocab) 的 Tensor，通常没问题。
+        amateur_probs_sequence = F.softmax(relevant_logits, dim=-1).cpu() # [1, Expert_Len, Vocab]
+        
+    # 清理显存
+    del outputs, logits, full_input_ids_batch, relevant_logits
+    torch.cuda.empty_cache()
 
-    # 计算 KL 散度和权重
+    # 5. 计算 KL 散度和权重 (逐步处理)
     samples_this_prompt = 0
-    for step in range(1, len(expert_targets)):
-        # 取回 Expert 和 Amateur 的概率分布 (都在 CPU 上计算，避免显存占用)
-        expert_dist = expert_probs[step]
-        amateur_dist = amateur_probs_all[step - 1]
+    
+    # expert_probs 列表长度 = Expert_Len
+    # amateur_probs_sequence 形状 = [1, Expert_Len, Vocab]
+    
+    # 确保长度对齐
+    seq_len = min(len(expert_probs), amateur_probs_sequence.size(1))
+    
+    for step in range(seq_len):
+        # 取回 Expert 和 Amateur 的概率分布
+        expert_dist = expert_probs[step] # 已经是 CPU Tensor
+        amateur_dist = amateur_probs_sequence[0, step, :] # CPU Tensor
 
         min_vocab_size = min(expert_dist.size(0), amateur_dist.size(0))
         expert_dist = expert_dist[:min_vocab_size]
@@ -196,7 +239,7 @@ for item in tqdm(expert_cache, desc="Amateur Evaluation"):
         P_E = expert_dist + epsilon
         P_A = amateur_dist + epsilon
 
-        kl_div = F.kl_div(P_A.log(), P_E, reduction='sum').item()
+        kl_div = (P_E * (P_E.log() - P_A.log())).sum().item()
 
         if kl_div < beta:
             continue
@@ -211,10 +254,15 @@ for item in tqdm(expert_cache, desc="Amateur Evaluation"):
         token_ids = torch.arange(expert_dist.size(0))[mask].tolist()
         token_strs = [tokenizer.decode([tid]) for tid in token_ids]
 
+        # 构造当前步的前缀 (用于数据集中展示)
+        # 注意：step 是从 0 开始的相对索引
+        # 实际前缀是 expert_targets[:step]
+        current_prefix_ids = expert_targets[:step]
+        
         sampled_dataset.append({
             "prompt_id": prompt_id,
-            "step": step,
-            "prefix": tokenizer.decode(expert_targets[:step]),
+            "step": step + 1, # 保持 1-based 习惯
+            "prefix": tokenizer.decode(current_prefix_ids),
             "tokens": token_strs,
             "token_ids": token_ids,
             "weights": weights.tolist(),
@@ -224,7 +272,7 @@ for item in tqdm(expert_cache, desc="Amateur Evaluation"):
 
     # 保存断点
     with open(checkpoint_path, "a", encoding="utf-8") as f:
-        json.dump({"prompt_id": prompt_id, "num_steps": len(expert_targets), "num_samples": samples_this_prompt}, f)
+        json.dump({"prompt_id": prompt_id, "num_steps": seq_len, "num_samples": samples_this_prompt}, f)
         f.write("\n")
 
 # === 保存最终的采样数据集 ===
