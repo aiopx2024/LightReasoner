@@ -75,8 +75,8 @@ if os.path.exists(checkpoint_path):
 # === Run CDRS sampling over prompts ===
 sampled_dataset = []
 
-for prompt_obj in tqdm(prompts, desc="Processing prompts"):
-    prompt_id = prompt_obj["id"]
+for i, prompt_obj in enumerate(tqdm(prompts, desc="Processing prompts")):
+    prompt_id = prompt_obj.get("id", i)
     if prompt_id in processed_ids:
         continue
 
@@ -98,7 +98,7 @@ for prompt_obj in tqdm(prompts, desc="Processing prompts"):
     )
 
     expert_targets = outputs.sequences[0][model_inputs.input_ids.shape[1]:].tolist()
-    expert_probs = [F.softmax(score[0], dim=-1) for score in outputs.scores]
+    expert_probs = [F.softmax(score[0], dim=-1).cpu() for score in outputs.scores]
 
     # === Optimization: Single Forward Pass for Amateur Model ===
     # Instead of N forward passes for N tokens, we concatenate the prompt and the full expert response
@@ -138,7 +138,7 @@ for prompt_obj in tqdm(prompts, desc="Processing prompts"):
     samples_this_prompt = 0
     for step in range(1, len(expert_targets)):
         expert_dist = expert_probs[step]
-        amateur_dist = amateur_probs_sequence[0, step - 1, :]
+        amateur_dist = amateur_probs_sequence[0, step, :]
 
         min_vocab_size = min(expert_dist.size(0), amateur_dist.size(0))
         expert_dist = expert_dist[:min_vocab_size]
